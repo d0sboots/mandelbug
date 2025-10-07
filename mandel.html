@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en" style="overflow: clip">
+  <head>
+    <meta charset="utf-8">
+    <link rel="modulepreload" href="mandel_worker.js">
+    <title>Mandelbrot Viewer</title>
+  </head>
+  <body style="background: black; margin: 0">
+    <canvas id="canvas"></canvas>
+    <script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+let pxdata;
+let pxdata32;
+let imgData;
+let height;
+let width;
+let pointsPerCall = 100;
+let raf = null;
+const pixelSize = 1 / 300;
+let cx = -0.75;
+let cy = 0;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragEndX = 0;
+let dragEndY = 0;
+let drawId = 0;
+let lines;
+const workers = [];
+const workMsgCount = [];
+const pending = new Map();
+
+window.onresize = resize;
+
+for (let i = 0; i < 4; ++i) {
+  workers[i] = new Worker("mandel_worker.js", {type: "module"});
+  workers[i].onmessage = handleMessage;
+  workMsgCount[i] = 0;
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  canvas.onpointermove = pointerMove;
+  dragStartX = event.x;
+  dragStartY = event.y;
+  dragEndX = event.x;
+  dragEndY = event.y;
+  canvas.setPointerCapture(event.pointerId);
+});
+canvas.addEventListener("pointerup", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  canvas.onpointermove = null;
+  canvas.releasePointerCapture(event.pointerId);
+});
+
+function pointerMove(event) {
+  dragEndX = event.x;
+  dragEndY = event.y;
+  if (raf === null) {
+    raf = requestAnimationFrame(animationFrame);
+  }
+}
+
+function* getLines() {
+  let i = 0;
+  const limit = width * height;
+  const inc = 31337 % limit; // A large enough prime that we know width/height won't be a multiple of
+  while (i < limit) {
+    let coords = new Uint32Array(pointsPerCall);
+    for (let j = 0; j < pointsPerCall; j++) {
+      coords[j] = i;
+      i += inc;
+      if (i >= limit) {
+        if (i === limit) {
+          coords = coords.subarray(0, j + 1);
+          break;
+        }
+        i -= limit;
+      }
+    }
+
+    drawId++;
+    yield {cx, cy, drawId, width, height, pixelSize, maxIters: 1000000, coords};
+  }
+}
+
+function redraw() {
+  lines = getLines();
+  // Invalidate all current work
+  for (const k of pending.keys()) {
+    pending.set(k, false);
+  }
+
+  // Queue two units of work per worker, so that workers always have something to do.
+  let i = -1;
+  while (true) {
+    do {
+      i++;
+      if (i >= workers.length * 2) return;
+    } while (workMsgCount[i % workers.length] >= 2);
+    handleMessage({target: workers[i % workers.length], data: {drawId: -1}});
+  }
+}
+
+function resize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  pxdata32 = new Uint32Array(width * height);
+  pxdata = new Uint8ClampedArray(pxdata32.buffer);
+  imgData = new ImageData(pxdata, width);
+  canvas.width = width;
+  canvas.height = height;
+  redraw();
+}
+
+resize();
+
+function handleMessage(msgEvent) {
+  const workerIdx = workers.indexOf(msgEvent.target);
+  // Can happen if we recreate workers to change pool size
+  if (workerIdx < 0) return;
+
+  const evalPerMs = msgEvent.data.evalPerMs;
+  // Use exponential smoothing to mix in a new rate target.
+  if (evalPerMs !== undefined) {
+    pointsPerCall = (1 - 0.01) * pointsPerCall + 0.01 * 5 *
+      (Number.isFinite(evalPerMs) ? evalPerMs : msgEvent.data.coords.length);
+  }
+  const nextLine = lines.next();
+  // The default state is each incoming message is balanced by a new outgoing
+  // one, and workMsgCount is unchanged. We modify it when this is untrue.
+  if (!nextLine.done) {
+    const value = nextLine.value;
+    pending.set(value.drawId, true);
+    msgEvent.target.postMessage(value, [value.coords.buffer]);
+  } else {
+    workMsgCount[workerIdx]--;
+  }
+  const drawId = msgEvent.data.drawId;
+  const active = pending.get(drawId);
+  if (!pending.delete(drawId)) {
+    // Item wasn't in map, no incoming message (this was a fake event to
+    // enqueue new work)
+    workMsgCount[workerIdx]++;
+  }
+  if (!active) return;
+
+  const {coords, points} = msgEvent.data;
+
+  view = new Uint32Array(points.buffer);
+  for (let i = 0; i < view.length; i++) {
+    pxdata32[coords[i]] = view[i];
+  }
+  if (raf === null) {
+    raf = requestAnimationFrame(animationFrame);
+  }
+}
+
+function animationFrame() {
+  raf = null;
+  const dx = dragEndX - dragStartX;
+  const dy = dragEndY - dragStartY;
+  dragStartX = dragEndX;
+  dragStartY = dragEndY;
+  if (dx !== 0 || dy !== 0) {
+    if (dx >= width || dx <= -width || dy >= height || dy <= -height) {
+      pxdata32.fill(0);
+    } else {
+      // We know we don't have to worry about dx wrapping lines
+      const offset = dy * width + dx;
+      if (offset > 0) {
+        pxdata32.copyWithin(offset, 0);
+      } else {
+        pxdata32.copyWithin(0, -offset);
+      }
+      const startPos = Math.max(0, dy) * width;
+      let pos = startPos;
+      for (let y = Math.max(0, dy); y < height + Math.min(0, dy); ++y) {
+        if (dx >= 0) {
+          pxdata32.fill(0, pos, pos + dx);
+        } else {
+          pxdata32.fill(0, pos + width + dx, pos + width);
+        }
+        pos += width;
+      }
+      pxdata32.fill(0, 0, startPos);
+      pxdata32.fill(0, pos);
+    }
+    cx += dx * pixelSize;
+    cy += dy * pixelSize;
+    redraw();
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+    </script>
+  </body>
+</html>
