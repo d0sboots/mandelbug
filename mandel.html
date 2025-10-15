@@ -5,32 +5,35 @@
     <link rel="modulepreload" href="mandel_worker.js">
     <title>Mandelbrot Viewer</title>
   </head>
-  <body style="background: black; margin: 0">
-    <canvas id="canvas"></canvas>
+  <body style="background: black; border: 0; margin: 0; height: 100%">
+    <canvas id="canvas" style="touch-action: none"></canvas>
     <script>
 const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-let pxdata;
-let pxdata32;
-let imgData;
-let height;
-let width;
+const gl = canvas.getContext("webgl2",
+  {antialias: false, preserveDrawingBuffer: true});
+let height = window.innerHeight;
+let width = window.innerWidth;
+let program;
+const uniforms = {};
+canvas.width = width;
+canvas.height = height;
+gl.viewport(0, 0, width, height);
 let pointsPerCall = 100;
-let raf = null;
-const pixelSize = 1 / 300;
+let pixelSize = 3 / Math.sqrt(width * height);
 let cx = -0.75;
 let cy = 0;
-let dragStartX = 0;
-let dragStartY = 0;
-let dragEndX = 0;
-let dragEndY = 0;
+let dragLastX = 0;
+let dragLastY = 0;
+let zoom = 1;
+let dx = 0;
+let dy = 0;
 let drawId = 0;
 let lines;
 const workers = [];
 const workMsgCount = [];
 const pending = new Map();
 
-window.onresize = resize;
+window.onresize = draw;
 
 for (let i = 0; i < 4; ++i) {
   workers[i] = new Worker("mandel_worker.js", {type: "module"});
@@ -42,10 +45,8 @@ canvas.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   event.preventDefault();
   canvas.onpointermove = pointerMove;
-  dragStartX = event.x;
-  dragStartY = event.y;
-  dragEndX = event.x;
-  dragEndY = event.y;
+  dragLastX = event.x;
+  dragLastY = event.y;
   canvas.setPointerCapture(event.pointerId);
 });
 canvas.addEventListener("pointerup", (event) => {
@@ -54,13 +55,33 @@ canvas.addEventListener("pointerup", (event) => {
   canvas.onpointermove = null;
   canvas.releasePointerCapture(event.pointerId);
 });
+canvas.addEventListener("wheel", wheel);
 
-function pointerMove(event) {
-  dragEndX = event.x;
-  dragEndY = event.y;
+let raf = null;
+function draw() {
   if (raf === null) {
     raf = requestAnimationFrame(animationFrame);
   }
+}
+
+initGL();
+redraw();
+
+function pointerMove(event) {
+  dx += event.x - dragLastX;
+  dy += event.y - dragLastY;
+  dragLastX = event.x;
+  dragLastY = event.y;
+  draw();
+}
+
+function wheel(event) {
+  const stepSize = ("wheelDelta" in event) ? event.wheelDelta / -120 : Math.sign(event.deltaY);
+  const pxAdd = Math.expm1(stepSize * .133531392624522623); // 0.875^(-stepSize) - 1
+  dx += zoom * pxAdd * (event.x - width / 2);
+  dy += zoom * pxAdd * (event.y - height / 2);
+  zoom += zoom * pxAdd;
+  draw();
 }
 
 function* getLines() {
@@ -68,8 +89,8 @@ function* getLines() {
   const limit = width * height;
   const inc = 31337 % limit; // A large enough prime that we know width/height won't be a multiple of
   while (i < limit) {
-    let coords = new Uint32Array(pointsPerCall);
-    for (let j = 0; j < pointsPerCall; j++) {
+    let coords = new Uint32Array(pointsPerCall | 0);
+    for (let j = 0; j < (pointsPerCall | 0); j++) {
       coords[j] = i;
       i += inc;
       if (i >= limit) {
@@ -84,6 +105,70 @@ function* getLines() {
     drawId++;
     yield {cx, cy, drawId, width, height, pixelSize, maxIters: 1000000, coords};
   }
+}
+
+function initGL() {
+  gl.clearColor(0.0, 0.0, 0.0, 1.0);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+
+  gl.enableVertexAttribArray(0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(0, 2, gl.UNSIGNED_SHORT, false, 8, 0);
+  gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 8, 4);
+
+  program = gl.createProgram();
+  const vShader = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vShader, `#version 300 es
+layout(location = 0) in vec2 coord;
+layout(location = 1) in vec4 color;
+
+uniform uint width;
+uniform uint height;
+
+out vec4 fColor;
+
+void main() {
+  vec2 transformed = (coord + 0.5) / (vec2(width, height) * 0.5) - 1.0;
+  gl_Position = vec4(transformed.x, transformed.y, 0.0, 1.0);
+  gl_PointSize = 1.0;
+  fColor = color * 2.5;
+}
+  `);
+  gl.compileShader(vShader);
+  if (!gl.getShaderParameter(vShader, gl.COMPILE_STATUS)) {
+    throw new Error('Unable to compile vertex shader:\n' + gl.getShaderInfoLog(vShader));
+  }
+
+  const fShader = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fShader, `#version 300 es
+precision highp float;
+
+in vec4 fColor;
+out vec4 oColor;
+
+void main() {
+  oColor = fColor;
+}
+  `);
+  gl.compileShader(fShader);
+  if (!gl.getShaderParameter(fShader, gl.COMPILE_STATUS)) {
+    throw new Error('Unable to compile fragment shader:\n' + gl.getShaderInfoLog(fShader));
+  }
+
+  gl.attachShader(program, vShader);
+  gl.attachShader(program, fShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error("Could not link:\n" + gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+  uniforms.width = gl.getUniformLocation(program, "width");
+  uniforms.height = gl.getUniformLocation(program, "height");
+  gl.uniform1ui(uniforms.width, width);
+  gl.uniform1ui(uniforms.height, height);
 }
 
 function redraw() {
@@ -104,19 +189,6 @@ function redraw() {
   }
 }
 
-function resize() {
-  width = window.innerWidth;
-  height = window.innerHeight;
-  pxdata32 = new Uint32Array(width * height);
-  pxdata = new Uint8ClampedArray(pxdata32.buffer);
-  imgData = new ImageData(pxdata, width);
-  canvas.width = width;
-  canvas.height = height;
-  redraw();
-}
-
-resize();
-
 function handleMessage(msgEvent) {
   const workerIdx = workers.indexOf(msgEvent.target);
   // Can happen if we recreate workers to change pool size
@@ -126,7 +198,7 @@ function handleMessage(msgEvent) {
   // Use exponential smoothing to mix in a new rate target.
   if (evalPerMs !== undefined) {
     pointsPerCall = (1 - 0.01) * pointsPerCall + 0.01 * 5 *
-      (Number.isFinite(evalPerMs) ? evalPerMs : msgEvent.data.coords.length);
+      (Number.isFinite(evalPerMs) ? evalPerMs : msgEvent.data.points.byteLength * 2);
   }
   const nextLine = lines.next();
   // The default state is each incoming message is balanced by a new outgoing
@@ -147,52 +219,39 @@ function handleMessage(msgEvent) {
   }
   if (!active) return;
 
-  const {coords, points} = msgEvent.data;
+  const {points} = msgEvent.data;
+  gl.bufferData(gl.ARRAY_BUFFER, points, gl.DYNAMIC_DRAW);
+  gl.drawArrays(gl.POINTS, 0, (points.byteLength / 8) | 0);
 
-  view = new Uint32Array(points.buffer);
-  for (let i = 0; i < view.length; i++) {
-    pxdata32[coords[i]] = view[i];
-  }
-  if (raf === null) {
-    raf = requestAnimationFrame(animationFrame);
-  }
+  draw();
 }
 
 function animationFrame() {
   raf = null;
-  const dx = dragEndX - dragStartX;
-  const dy = dragEndY - dragStartY;
-  dragStartX = dragEndX;
-  dragStartY = dragEndY;
-  if (dx !== 0 || dy !== 0) {
-    if (dx >= width || dx <= -width || dy >= height || dy <= -height) {
-      pxdata32.fill(0);
-    } else {
-      // We know we don't have to worry about dx wrapping lines
-      const offset = dy * width + dx;
-      if (offset > 0) {
-        pxdata32.copyWithin(offset, 0);
-      } else {
-        pxdata32.copyWithin(0, -offset);
-      }
-      const startPos = Math.max(0, dy) * width;
-      let pos = startPos;
-      for (let y = Math.max(0, dy); y < height + Math.min(0, dy); ++y) {
-        if (dx >= 0) {
-          pxdata32.fill(0, pos, pos + dx);
-        } else {
-          pxdata32.fill(0, pos + width + dx, pos + width);
-        }
-        pos += width;
-      }
-      pxdata32.fill(0, 0, startPos);
-      pxdata32.fill(0, pos);
-    }
-    cx += dx * pixelSize;
-    cy += dy * pixelSize;
-    redraw();
+  const newWidth = window.innerWidth;
+  const newHeight = window.innerHeight;
+  if (newWidth !== width || newHeight !== height) {
+    canvas.width = newWidth;
+    canvas.height = newHeight;
+    gl.viewport(0, 0, newWidth, newHeight);
+    gl.uniform1ui(uniforms.width, newWidth);
+    gl.uniform1ui(uniforms.height, newHeight);
+  } else {
   }
-  ctx.putImageData(imgData, 0, 0);
+  if (width === window.innerWidth && height === window.innerHeight &&
+      dx === 0 && dy === 0 && zoom === 1) {
+    return;
+  }
+  // Otherwise, we have to move and/or rescale the image.
+  width = newWidth;
+  height = newHeight;
+  cx -= dx * pixelSize;
+  cy -= dy * pixelSize;
+  pixelSize *= zoom;
+  dx = 0;
+  dy = 0;
+  zoom = 1;
+  redraw();
 }
     </script>
   </body>

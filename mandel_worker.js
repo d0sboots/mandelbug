@@ -42,7 +42,7 @@ const PARAMS = [
 ];
 
 function logistic(x, a, m, b) {
-  return Math.floor(a + (255.99 - a) / (1 + Math.exp(m * (b - x))));
+  return Math.max(0, Math.floor(a + (255.99 - a) / (1 + Math.exp(m * (b - x)))));
 }
 
 function handleMessage(msgEvent) {
@@ -51,23 +51,29 @@ function handleMessage(msgEvent) {
   const sizeHalf = pixelSize * 0.5;
   const baseX = cx - (width - 1) * sizeHalf;
   const baseY = cy + (height - 1) * sizeHalf;
-  const result = new Uint8ClampedArray(coords.length * 4);
+  const result = new ArrayBuffer(coords.length * 8);
+  const view16 = new Uint16Array(result);
+  const view8 = new Uint8Array(result);
   for (let i = 0; i < coords.length; i++) {
-    const x = baseX + (coords[i] % width) * pixelSize;
-    const y = baseY - ((coords[i] / width) | 0) * pixelSize;
-    const it = iters(x, y, maxIters);
     const j = i * 4;
+    const offset = i * 8;
+    const px = coords[i] % width;
+    const py = (coords[i] / width) | 0;
+    view16[j] = px;
+    view16[j + 1] = py;
+    const x = baseX + px * pixelSize;
+    const y = baseY - py * pixelSize;
+    const it = iters(x, y, maxIters);
     if (it >= maxIters) {
-      result[j] = 0;
-      result[j+1] = 0;
-      result[j+2] = 0;
+      view16[j + 2] = 0;
+      view16[j + 3] = 255 << 8;
     } else {
-      result[j] = logistic(it, ...PARAMS[0])
-      result[j+1] = logistic(it, ...PARAMS[1])
-      result[j+2] = logistic(it, ...PARAMS[2])
+      view8[offset + 4] = logistic(it, ...PARAMS[0])
+      view8[offset + 5] = logistic(it, ...PARAMS[1])
+      view8[offset + 6] = logistic(it, ...PARAMS[2])
+      view8[offset + 7] = 255;
     }
-    result[j+3] = 255;
   }
   const evalPerMs = coords.length / (performance.now() - startTime);
-  self.postMessage({drawId, evalPerMs, coords, points: result}, [coords.buffer, result.buffer]);
+  self.postMessage({drawId, evalPerMs, points: result}, [result]);
 }
