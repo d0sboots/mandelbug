@@ -13,7 +13,8 @@ const gl = canvas.getContext("webgl2",
   {antialias: false, preserveDrawingBuffer: true});
 let height = window.innerHeight;
 let width = window.innerWidth;
-let program;
+let program, programQuad;
+let vao, vaoQuad;
 const uniforms = {};
 canvas.width = width;
 canvas.height = height;
@@ -109,11 +110,72 @@ function* getLines() {
 
 function initGL() {
   gl.clearColor(0.0, 0.0, 0.0, 1.0);
-  const vao = gl.createVertexArray();
+
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  vaoQuad = gl.createVertexArray();
+  gl.bindVertexArray(vaoQuad);
+  const vboQuad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vboQuad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array([0,0, 0,1, 1,1, 1,0]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.UNSIGNED_BYTE, false, 0, 0);
+
+  programQuad = gl.createProgram();
+  const vShaderQuad = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vShaderQuad, `#version 300 es
+layout(location = 0) in vec2 coord;
+
+void main() {
+  gl_Position = vec4(coord * 2.0 - 1.0, 0.0, 1.0);
+}
+  `);
+  gl.compileShader(vShaderQuad);
+  if (!gl.getShaderParameter(vShaderQuad, gl.COMPILE_STATUS)) {
+    throw new Error('Unable to compile vertex shader:\n' + gl.getShaderInfoLog(vShaderQuad));
+  }
+
+  const fShaderQuad = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fShaderQuad, `#version 300 es
+precision highp float;
+
+uniform vec2 delta;
+uniform vec2 zoom;
+uniform sampler2D tex;
+
+out vec4 color;
+
+void main() {
+  vec2 coord = vec2(gl_FragCoord) * zoom + delta;
+  color = (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) ?
+      vec4(0) : texture(tex, coord);
+}
+  `);
+  gl.compileShader(fShaderQuad);
+  if (!gl.getShaderParameter(fShaderQuad, gl.COMPILE_STATUS)) {
+    throw new Error('Unable to compile fragment shader:\n' + gl.getShaderInfoLog(fShaderQuad));
+  }
+
+  gl.attachShader(programQuad, vShaderQuad);
+  gl.attachShader(programQuad, fShaderQuad);
+  gl.linkProgram(programQuad);
+  if (!gl.getProgramParameter(programQuad, gl.LINK_STATUS)) {
+    throw new Error("Could not link:\n" + gl.getProgramInfoLog(programQuad));
+  }
+  uniforms.delta = gl.getUniformLocation(programQuad, "delta");
+  uniforms.zoom = gl.getUniformLocation(programQuad, "zoom");
+  uniforms.tex = gl.getUniformLocation(programQuad, "tex");
+
+  vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
   const vbo = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-
   gl.enableVertexAttribArray(0);
   gl.enableVertexAttribArray(1);
   gl.vertexAttribPointer(0, 2, gl.UNSIGNED_SHORT, false, 8, 0);
@@ -125,13 +187,12 @@ function initGL() {
 layout(location = 0) in vec2 coord;
 layout(location = 1) in vec4 color;
 
-uniform uint width;
-uniform uint height;
+uniform vec2 dim;
 
 out vec4 fColor;
 
 void main() {
-  vec2 transformed = (coord + 0.5) / (vec2(width, height) * 0.5) - 1.0;
+  vec2 transformed = (coord + 0.5) / (dim * 0.5) - 1.0;
   gl_Position = vec4(transformed.x, transformed.y, 0.0, 1.0);
   gl_PointSize = 1.0;
   fColor = color * 2.5;
@@ -165,10 +226,8 @@ void main() {
     throw new Error("Could not link:\n" + gl.getProgramInfoLog(program));
   }
   gl.useProgram(program);
-  uniforms.width = gl.getUniformLocation(program, "width");
-  uniforms.height = gl.getUniformLocation(program, "height");
-  gl.uniform1ui(uniforms.width, width);
-  gl.uniform1ui(uniforms.height, height);
+  uniforms.dim = gl.getUniformLocation(program, "dim");
+  gl.uniform2fv(uniforms.dim, [width, height]);
 }
 
 function redraw() {
@@ -230,23 +289,43 @@ function animationFrame() {
   raf = null;
   const newWidth = window.innerWidth;
   const newHeight = window.innerHeight;
+  const noRescale = width === newWidth && height === newHeight && zoom === 1;
+  const isSimple = noRescale && dx === 0 && dy === 0;
+  if (!isSimple) {
+    gl.copyTexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 0, 0, width, height, 0);
+    if (noRescale) {
+      // We can sample faster because there's no resize going on
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    }
+  }
   if (newWidth !== width || newHeight !== height) {
     canvas.width = newWidth;
     canvas.height = newHeight;
     gl.viewport(0, 0, newWidth, newHeight);
-    gl.uniform1ui(uniforms.width, newWidth);
-    gl.uniform1ui(uniforms.height, newHeight);
-  } else {
   }
-  if (width === window.innerWidth && height === window.innerHeight &&
-      dx === 0 && dy === 0 && zoom === 1) {
-    return;
-  }
+  if (isSimple) return;
   // Otherwise, we have to move and/or rescale the image.
+  gl.useProgram(programQuad);
+  gl.bindVertexArray(vaoQuad);
+  // We are applying fragcoord * zoom + delta in the shader, so we have to
+  // pre-multiply all our values here.
+  // Input range is [0,0]-[newWidth, newHeight], output is (nominally) [0,0]-[1,1]
+  gl.uniform2fv(uniforms.zoom, [zoom / width, zoom / height]);
+  gl.uniform2fv(uniforms.delta, [
+      (-dx - 0.5 * zoom * newWidth) / width + 0.5,
+      (dy - 0.5 * zoom * newHeight) / height + 0.5]);
+  gl.uniform1i(uniforms.tex, 0);
+  gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+  gl.useProgram(program);
+  gl.uniform2fv(uniforms.dim, [newWidth, newHeight]);
+  gl.bindVertexArray(vao);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   width = newWidth;
   height = newHeight;
   cx -= dx * pixelSize;
-  cy -= dy * pixelSize;
+  cy += dy * pixelSize;
   pixelSize *= zoom;
   dx = 0;
   dy = 0;

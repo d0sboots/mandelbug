@@ -50,7 +50,7 @@ function handleMessage(msgEvent) {
   const {cx, cy, drawId, width, height, pixelSize, maxIters, coords} = msgEvent.data;
   const sizeHalf = pixelSize * 0.5;
   const baseX = cx - (width - 1) * sizeHalf;
-  const baseY = cy + (height - 1) * sizeHalf;
+  const baseY = cy - (height - 1) * sizeHalf;
   const result = new ArrayBuffer(coords.length * 8);
   const view16 = new Uint16Array(result);
   const view8 = new Uint8Array(result);
@@ -62,7 +62,7 @@ function handleMessage(msgEvent) {
     view16[j] = px;
     view16[j + 1] = py;
     const x = baseX + px * pixelSize;
-    const y = baseY - py * pixelSize;
+    const y = baseY + py * pixelSize;
     const it = iters(x, y, maxIters);
     if (it >= maxIters) {
       view16[j + 2] = 0;
