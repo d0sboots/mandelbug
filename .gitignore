@@ -1,1 +1,4 @@
 /target
+/web_wasm/Cargo.lock
+/web_wasm/target
+out.wasm

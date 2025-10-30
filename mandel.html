@@ -7,8 +7,14 @@
   </head>
   <body style="background: black; border: 0; margin: 0; height: 100%">
     <canvas id="canvas" style="touch-action: none"></canvas>
+    <div id="status" style="position: absolute; bottom: 0; left: 0; color: white"></div>
     <script>
+"use strict";
+const wasmSrc = Uint8Array.from("onooonfmoonnllmonjlnokhymi\n\0mof\nooe jmÆlkdjknm/.G@noMb*bo.KGmoMd*bo.gDloOb×+ooooooÐÏ.wDlo+ooooooPÍMoÍÎNf.DloOo.E@no×+ooooooÐÏÍÎNel/Od.nMd.lMa.AOd.m.CGmoM`ObMcTnoOa.CO`OcObMaTnoOd.l._mOe.wDloMoOc×ÍÏMmOmÍMjOfOoOa×ÍÏMlOlÍMiÏMh+oo[IC,k.OGmoMcÃN}-eN-oN~-eN|OlMoNkOmMnNgm/l/OmOnOoOoÏÍÏNnm/OlOiOjÎÏMoOk\rboOnOg\rbo,ooïckdm/OO~-nM~8k/O~O}6bnO|-nM|OMO}OO}<tNOnNgOoNkdOnOnÍMjOoOoÍMiÏMh+oo[IC,*bmcnddOcÝcmdO~Új,oooodOhÙnnü,oo¯PýdWmoOdbodddÎmmmmm/m/OoÓMn.ïïïk!k/On.h$bn.îNm,ooooNoOn.ïïïl)bncmdOo,oooo4k/,ooïÐOoOoûú`dOn.o!k/Oo,ooo#ûÓNn.NmcmdOoOoü,ooooúNodOo`dOn.âÄmMn.l.æ»lÑ,ooïÐýMoOoOo,oooPûûMlüÓ.ïÑMk,oß×PûOoOküOlüOoOo,ooo/ýúMoOlOoOoûMoOoOoûMo,þQû,ÅÅEPýûOoOo,IñQû,|¡£QýûýýûýMo,oß×PûOoOký,»õWÖûýýOmOn.xÝýd", x => x.charCodeAt(0) ^ 0x6f);
+
+const wasmMod = new WebAssembly.Module(wasmSrc);
 const canvas = document.getElementById("canvas");
+const statusElem = document.getElementById("status");
 const gl = canvas.getContext("webgl2",
   {antialias: false, preserveDrawingBuffer: true});
 let height = window.innerHeight;
@@ -34,14 +40,14 @@ const workers = [];
 const workMsgCount = [];
 const pending = new Map();
 
-window.onresize = draw;
-
 for (let i = 0; i < 4; ++i) {
   workers[i] = new Worker("mandel_worker.js", {type: "module"});
   workers[i].onmessage = handleMessage;
+  workers[i].postMessage({wasm: wasmMod})
   workMsgCount[i] = 0;
 }
 
+window.onresize = draw;
 canvas.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   event.preventDefault();
@@ -287,6 +293,7 @@ function handleMessage(msgEvent) {
 
 function animationFrame() {
   raf = null;
+  statusElem.textContent = `points/(thread·s): ${pointsPerCall*200}`;
   const newWidth = window.innerWidth;
   const newHeight = window.innerHeight;
   const noRescale = width === newWidth && height === newHeight && zoom === 1;

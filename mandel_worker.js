@@ -1,4 +1,19 @@
-self.onmessage = handleMessage;
+self.onmessage = firstMessage;
+
+let wasm;
+let dataView;
+let viewf32;
+let viewu32;
+let calculate;
+
+function firstMessage(msgEvent) {
+  self.onmessage = handleMessage;
+  wasm = new WebAssembly.Instance(msgEvent.data.wasm);
+  dataView = new DataView(wasm.exports.memory.buffer);
+  viewf32 = new Float32Array(dataView.buffer);
+  viewu32 = new Uint32Array(dataView.buffer);
+  calculate = wasm.exports.calculate;
+}
 
 function iters(cx, cy, maxIters) {
   let x = cx, y = cy;
@@ -48,6 +63,31 @@ function logistic(x, a, m, b) {
 function handleMessage(msgEvent) {
   const startTime = performance.now();
   const {cx, cy, drawId, width, height, pixelSize, maxIters, coords} = msgEvent.data;
+  // Offsets start at 8 to avoid nullptr
+  dataView.setFloat64(8, cx, true);
+  dataView.setFloat64(16, cy, true);
+  dataView.setFloat64(24, pixelSize, true);
+  dataView.setInt32(32, maxIters, true);
+  dataView.setUint32(36, coords.length, true);
+  dataView.setUint16(40, width, true);
+  dataView.setUint16(42, height, true);
+  viewu32.set(coords, 11);
+  calculate();
+  const outArray = new Float32Array(viewf32.subarray(11, coords.length * 2 + 11));
+  const result = outArray.buffer;
+  const view8 = new Uint8Array(result);
+  for (let i = 1; i < outArray.length; i += 2) {
+    const j = i * 4;
+    const it = outArray[i];
+    if (it >= maxIters) {
+      outArray[i] = -1.70141183e38; // 00 00 00 ff when stored LE
+    } else {
+      view8[j] = logistic(it, ...PARAMS[0])
+      view8[j + 1] = logistic(it, ...PARAMS[1])
+      view8[j + 2] = logistic(it, ...PARAMS[2])
+      view8[j + 3] = 255;
+    }
+  }/*
   const sizeHalf = pixelSize * 0.5;
   const baseX = cx - (width - 1) * sizeHalf;
   const baseY = cy - (height - 1) * sizeHalf;
@@ -73,7 +113,7 @@ function handleMessage(msgEvent) {
       view8[offset + 6] = logistic(it, ...PARAMS[2])
       view8[offset + 7] = 255;
     }
-  }
+  }*/
   const evalPerMs = coords.length / (performance.now() - startTime);
   self.postMessage({drawId, evalPerMs, points: result}, [result]);
 }
